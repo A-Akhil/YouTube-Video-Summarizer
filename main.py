@@ -6,11 +6,12 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from ollama import Client
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Generator, Any
 import hashlib
 import json
 from dataclasses import dataclass
 from functools import lru_cache
+import asyncio
 
 @dataclass
 class SummaryContext:
@@ -65,7 +66,7 @@ class YouTubeSummarizer:
         if content_density:
             # Adjust chunk size inversely to content density
             chunk_size = int(base_chunk_size * (1 / content_density))
- #           chunk_size = max(1024, min(chunk_size, 4096))  # Keep within reasonable bounds
+            chunk_size = max(1024, min(chunk_size, 4096))  # Keep within reasonable bounds
         else:
             chunk_size = base_chunk_size
 
@@ -145,6 +146,59 @@ class YouTubeSummarizer:
         density = (avg_sentence_length * 0.5 + (unique_words / len(words)) * 0.5) / 10
         return min(max(density, 0.5), 2.0)  # Bound between 0.5 and 2.0
 
+    def create_summary_chain(self, model_name: str, style: str, context: Optional[SummaryContext] = None):
+        """Create and return a summary chain that can be used for streaming."""
+        llm = ChatOllama(
+            model=model_name,
+            temperature=0.5,
+            base_url=self.ollama_host,
+            streaming=True  # Enable streaming
+        )
+        prompt = ChatPromptTemplate.from_template(self.get_summary_prompt(style, context))
+        chain = prompt | llm | StrOutputParser()
+        return chain
+
+    async def summarize_stream(
+        self,
+        chunks: List,
+        model_name: str,
+        style: str = "Detailed Summary",
+        context: Optional[SummaryContext] = None,
+    ) -> Generator[str, None, None]:
+        """Generate streaming summary using the selected model and style."""
+        try:
+            chain = self.create_summary_chain(model_name, style, context)
+            
+            for chunk in chunks:
+                density = self.calculate_content_density(chunk.page_content)
+                if density > 1.5:
+                    subchunks = self.split_transcript(chunk.page_content, density)
+                    for subchunk in subchunks:
+                        async for token in chain.astream({"chunk": subchunk.page_content}):
+                            yield token
+                else:
+                    async for token in chain.astream({"chunk": chunk.page_content}):
+                        yield token
+                yield "\n\n"  # Add separation between chunk summaries
+
+            # If style requires final processing
+            if len(chunks) > 3 and style not in ["Key Takeaways", "Quick Review"]:
+                final_prompt = ChatPromptTemplate.from_template(
+                    "Synthesize these summary points into a coherent summary: {text}"
+                )
+                final_chain = final_prompt | ChatOllama(
+                    model=model_name,
+                    temperature=0.5,
+                    base_url=self.ollama_host,
+                    streaming=True
+                ) | StrOutputParser()
+                
+                async for token in final_chain.astream({"text": " ".join(str(c.page_content) for c in chunks)}):
+                    yield token
+
+        except Exception as e:
+            raise Exception(f"Error during streaming summarization: {str(e)}")
+
     def summarize(
         self,
         chunks: List,
@@ -152,7 +206,7 @@ class YouTubeSummarizer:
         style: str = "Detailed Summary",
         context: Optional[SummaryContext] = None,
     ) -> str:
-        """Generate context-aware summary using the selected model and style."""
+        """Generate context-aware summary using the selected model and style (non-streaming)."""
         cache_key = f"summary_{model_name}_{style}_{self._generate_cache_key(str(chunks))}"
         if cache_key in self._cache and not context:  # Don't cache context-specific summaries
             return self._cache[cache_key]
