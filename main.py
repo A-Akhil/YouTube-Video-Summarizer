@@ -1,8 +1,7 @@
-# main.py
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from ollama import Client
@@ -11,6 +10,7 @@ import re
 class YouTubeSummarizer:
     def __init__(self, ollama_host):
         """Initialize the summarizer with Ollama host URL."""
+        self.ollama_host = ollama_host
         self.client = Client(host=ollama_host)
     
     def get_video_id(self, url):
@@ -70,7 +70,11 @@ class YouTubeSummarizer:
     def summarize(self, chunks, model_name, style="Detailed Summary"):
         """Generate summary using the selected model and style."""
         try:
-            llm = ChatOllama(model=model_name, temperature=0.5)
+            llm = ChatOllama(
+                model=model_name,
+                temperature=0.5,
+                base_url=self.ollama_host
+            )
             prompt = ChatPromptTemplate.from_template(self.get_summary_prompt(style))
             chain = prompt | llm | StrOutputParser()
 
